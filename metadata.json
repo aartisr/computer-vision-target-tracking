@@ -1,0 +1,6 @@
+{
+  "name": "AEGIS-EDGE: GNSS-Denied Computer Vision & Target Tracking System",
+  "description": "Tactical edge computer vision console featuring ByteTrack multi-object tracking, Extended Kalman Filter state estimation, degraded multi-spectral sensor processing (thermal FLIR, low-light, fog), optical dead-reckoning navigation, and TensorRT FP16/INT8 hardware profiling.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
