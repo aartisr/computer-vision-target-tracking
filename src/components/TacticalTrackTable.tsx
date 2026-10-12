@@ -7,6 +7,8 @@ interface TacticalTrackTableProps {
   selectedTrackId: number | null;
   onSelectTrack: (id: number | null) => void;
   onOpenTargetDetailModal: (tracklet: Tracklet) => void;
+  autoCenter?: boolean;
+  onToggleAutoCenter?: () => void;
 }
 
 export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
@@ -14,6 +16,8 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
   selectedTrackId,
   onSelectTrack,
   onOpenTargetDetailModal,
+  autoCenter = false,
+  onToggleAutoCenter,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [filterState, setFilterState] = useState<'all' | 'confirmed' | 'tentative' | 'lost'>('all');
@@ -33,7 +37,7 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-[#090e1b] border border-slate-800 rounded-lg text-slate-200 text-xs overflow-hidden">
-      {/* Table Header & Search */}
+      {/* Table Header, Search & Target Auto-Center Control */}
       <div className="p-3 border-b border-slate-800/80 bg-[#0c1222]">
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
@@ -62,7 +66,7 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
         </div>
 
         {/* Search Input */}
-        <div className="relative">
+        <div className="relative mb-2.5">
           <Search className="w-3.5 h-3.5 absolute left-2.5 top-2 text-slate-500" />
           <input
             type="text"
@@ -71,6 +75,63 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
             onChange={e => setSearchQuery(e.target.value)}
             className="w-full pl-8 pr-3 py-1.5 bg-slate-950/70 border border-slate-800 rounded text-slate-200 text-xs focus:outline-none focus:border-cyan-500"
           />
+        </div>
+
+        {/* Target Auto-Center Slew-to-Cue Gimbal Controller */}
+        <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Crosshair
+              className={`w-3.5 h-3.5 shrink-0 transition-colors ${
+                autoCenter ? 'text-cyan-400 animate-pulse' : 'text-slate-500'
+              }`}
+            />
+            <span className="font-semibold text-slate-200 text-[11px] truncate">
+              Target Auto-Center
+            </span>
+            {autoCenter && (
+              <span
+                className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${
+                  selectedTrackId
+                    ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/40'
+                    : 'bg-slate-900 text-slate-400 border-slate-800'
+                }`}
+              >
+                {selectedTrackId ? `TRK-${String(selectedTrackId).padStart(2, '0')}` : 'STANDBY'}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              className={`text-[10px] font-mono font-medium ${
+                autoCenter ? 'text-cyan-400' : 'text-slate-500'
+              }`}
+            >
+              {autoCenter ? 'ACTIVE' : 'OFF'}
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={autoCenter}
+              onClick={onToggleAutoCenter}
+              title={
+                autoCenter
+                  ? 'Target Auto-Center is active: Viewport smoothly pans & zooms to center selected contact'
+                  : 'Enable Target Auto-Center to keep selected target centered in frame'
+              }
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border transition-colors duration-200 ease-in-out focus:outline-none ${
+                autoCenter
+                  ? 'bg-cyan-500 border-cyan-400 shadow-[0_0_8px_rgba(6,182,212,0.4)]'
+                  : 'bg-slate-800 border-slate-700 hover:border-slate-600'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-3.5 w-3.5 transform rounded-full bg-slate-950 shadow transition duration-200 ease-in-out mt-0.5 ${
+                  autoCenter ? 'translate-x-4' : 'translate-x-0.5'
+                }`}
+              />
+            </button>
+          </div>
         </div>
       </div>
 
@@ -112,9 +173,19 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
                   >
                     {/* Track ID */}
                     <td className="py-2 px-3 whitespace-nowrap">
-                      <span className={`font-semibold ${isSelected ? 'text-rose-400' : 'text-cyan-400'}`}>
-                        TRK-{String(trk.id).padStart(2, '0')}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className={`font-semibold ${isSelected ? 'text-rose-400' : 'text-cyan-400'}`}>
+                          TRK-{String(trk.id).padStart(2, '0')}
+                        </span>
+                        {isSelected && autoCenter && (
+                          <span
+                            title="Viewport auto-centered on this target"
+                            className="px-1 py-0.2 rounded text-[8px] font-mono font-bold tracking-tight bg-rose-500/20 text-rose-300 border border-rose-500/40"
+                          >
+                            CENTERED
+                          </span>
+                        )}
+                      </div>
                     </td>
 
                     {/* Class & Category */}
@@ -187,12 +258,26 @@ export const TacticalTrackTable: React.FC<TacticalTrackTableProps> = ({
               <Crosshair className="w-3.5 h-3.5 text-rose-400" />
               INTERCEPT VECTOR // TRK-{String(selectedTracklet.id).padStart(2, '0')}
             </span>
-            <button
-              onClick={() => onOpenTargetDetailModal(selectedTracklet)}
-              className="text-[10px] text-cyan-400 hover:underline"
-            >
-              Full Telemetry
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onToggleAutoCenter}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors flex items-center gap-1 ${
+                  autoCenter
+                    ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm shadow-cyan-500/20'
+                    : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+                title="Toggle Target Auto-Center"
+              >
+                <Crosshair className={`w-3 h-3 ${autoCenter ? 'text-cyan-400' : 'text-slate-500'}`} />
+                <span>AUTO-CENTER: {autoCenter ? 'ON' : 'OFF'}</span>
+              </button>
+              <button
+                onClick={() => onOpenTargetDetailModal(selectedTracklet)}
+                className="text-[10px] text-cyan-400 hover:underline"
+              >
+                Full Telemetry
+              </button>
+            </div>
           </div>
           <div className="grid grid-cols-3 gap-2 text-slate-400">
             <div>

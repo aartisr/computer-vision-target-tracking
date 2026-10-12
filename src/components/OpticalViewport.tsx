@@ -1,4 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { Crosshair } from 'lucide-react';
 import {
   Tracklet,
   DegradationSettings,
@@ -25,6 +26,8 @@ interface OpticalViewportProps {
   activeDevice?: HardwareDevice;
   onChangeDevice?: (device: HardwareDevice) => void;
   precision?: QuantizationPrecision;
+  autoCenter?: boolean;
+  onToggleAutoCenter?: () => void;
 }
 
 export const OpticalViewport: React.FC<OpticalViewportProps> = ({
@@ -41,12 +44,19 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
   activeDevice = 'orin_nano',
   onChangeDevice = () => {},
   precision = 'INT8',
+  autoCenter = false,
+  onToggleAutoCenter,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const simTimeRef = useRef<number>(0);
   const [fpsCounter, setFpsCounter] = useState<number>(60);
   const frameTimesRef = useRef<number[]>([]);
+
+  // Slew-to-Cue Gimbal Camera Pan & Zoom Refs
+  const panRef = useRef<{ x: number; y: number }>({ x: 480, y: 270 });
+  const zoomRef = useRef<number>(1.0);
+  const [zoomLevel, setZoomLevel] = useState<number>(2.0);
 
   // Internal simulated physical target positions that move smoothly
   const simTargetsRef = useRef<
@@ -125,8 +135,43 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
         jitterY = (Math.cos(t * 29.3) + Math.sin(t * 53.7)) * degradation.jitterRms * 0.7;
       }
 
+      // --- TARGET AUTO-CENTER & GIMBAL SLEW INTERPOLATION ---
+      const selectedTracklet = selectedTrackId ? tracklets.find(t => t.id === selectedTrackId) : null;
+      let desiredZoom = 1.0;
+      let desiredPanX = width / 2;
+      let desiredPanY = height / 2;
+
+      if (autoCenter && selectedTracklet) {
+        desiredZoom = zoomLevel;
+        desiredPanX = selectedTracklet.bbox.x + selectedTracklet.bbox.w / 2;
+        desiredPanY = selectedTracklet.bbox.y + selectedTracklet.bbox.h / 2;
+
+        // Catch canvas wrap-around jump so camera does not whip across frame
+        if (Math.abs(desiredPanX - panRef.current.x) > width * 0.5) {
+          panRef.current.x = desiredPanX;
+        }
+        if (Math.abs(desiredPanY - panRef.current.y) > height * 0.5) {
+          panRef.current.y = desiredPanY;
+        }
+      }
+
+      // Smooth gimbal camera tracking interpolation
+      const lerpFactor = 1 - Math.exp(-dt * 6.5);
+      panRef.current.x += (desiredPanX - panRef.current.x) * lerpFactor;
+      panRef.current.y += (desiredPanY - panRef.current.y) * lerpFactor;
+      zoomRef.current += (desiredZoom - zoomRef.current) * lerpFactor;
+
+      const curZoom = zoomRef.current;
+      const curPanX = panRef.current.x;
+      const curPanY = panRef.current.y;
+
       ctx.save();
       ctx.translate(jitterX, jitterY);
+
+      // Apply Slew-to-Cue Gimbal Pan & Zoom Transformation
+      ctx.translate(width / 2, height / 2);
+      ctx.scale(curZoom, curZoom);
+      ctx.translate(-curPanX, -curPanY);
 
       // --- 1. RENDER BACKGROUND ---
       if (isWebcamActive && videoRef.current && videoRef.current.readyState >= 2) {
@@ -226,12 +271,25 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
         degradation.enableCovarianceEllipse
       );
 
-      // --- 6. RENDER HUD HEADS-UP DISPLAY (Reticle, Boresight, Telemetry) ---
-      if (degradation.enableHorizonHud) {
-        drawTacticalHud(ctx, width, height, t, fpsCounter, degradation);
-      }
-
       ctx.restore();
+
+      // --- 6. RENDER HUD HEADS-UP DISPLAY (Reticle, Boresight, Telemetry) in SCREEN SPACE ---
+      if (degradation.enableHorizonHud) {
+        ctx.save();
+        ctx.translate(jitterX * 0.25, jitterY * 0.25);
+        drawTacticalHud(
+          ctx,
+          width,
+          height,
+          t,
+          fpsCounter,
+          degradation,
+          autoCenter,
+          selectedTracklet,
+          curZoom
+        );
+        ctx.restore();
+      }
 
       animFrameRef.current = requestAnimationFrame(render);
     };
@@ -252,9 +310,11 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
     tracklets,
     selectedTrackId,
     opticalFlowPoints,
+    autoCenter,
+    zoomLevel,
   ]);
 
-  // Click handler to select / lock target
+  // Click handler to select / lock target (inverts pan/zoom transform for accurate hit detection)
   const handleCanvasClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current;
@@ -263,14 +323,22 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
       const clickX = ((e.clientX - rect.left) / rect.width) * canvas.width;
       const clickY = ((e.clientY - rect.top) / rect.height) * canvas.height;
 
+      const curZoom = zoomRef.current;
+      const curPanX = panRef.current.x;
+      const curPanY = panRef.current.y;
+
+      // Invert pan & zoom transformation to map screen coordinates to world coordinates
+      const worldClickX = (clickX - canvas.width / 2) / curZoom + curPanX;
+      const worldClickY = (clickY - canvas.height / 2) / curZoom + curPanY;
+
       // Find closest tracklet
       let clickedId: number | null = null;
-      let minDistance = 45; // pixel tolerance
+      let minDistance = 50 / curZoom; // tolerance in world units
 
       for (const trk of tracklets) {
         const cx = trk.bbox.x + trk.bbox.w / 2;
         const cy = trk.bbox.y + trk.bbox.h / 2;
-        const dist = Math.hypot(clickX - cx, clickY - cy);
+        const dist = Math.hypot(worldClickX - cx, worldClickY - cy);
         if (dist < minDistance) {
           minDistance = dist;
           clickedId = trk.id;
@@ -317,8 +385,48 @@ export const OpticalViewport: React.FC<OpticalViewportProps> = ({
           )}
         </div>
 
-        {/* Edge Hardware Health Indicator specifically tailored for Jetson / Raspberry Pi */}
+        {/* Viewport Top Right: Auto-Center status, zoom controls, and Edge Hardware Health */}
         <div className="flex items-center gap-2">
+          {/* Target Auto-Center Indicator & Zoom Select */}
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={onToggleAutoCenter}
+              title={
+                autoCenter
+                  ? 'Target Auto-Center Active (Click to disable)'
+                  : 'Target Auto-Center Inactive (Click to enable)'
+              }
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-mono transition-colors ${
+                autoCenter
+                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm shadow-cyan-500/20'
+                  : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
+              }`}
+            >
+              <Crosshair className={`w-3 h-3 ${autoCenter ? 'text-cyan-400 animate-pulse' : 'text-slate-500'}`} />
+              <span className="hidden sm:inline">AUTO-CENTER:</span>
+              <span className="font-bold">{autoCenter ? 'ON' : 'OFF'}</span>
+            </button>
+
+            {autoCenter && (
+              <div className="flex items-center bg-slate-900 border border-slate-800 rounded p-0.5 text-[9px] font-mono">
+                {([1.5, 2.0, 2.5] as const).map(z => (
+                  <button
+                    key={z}
+                    onClick={() => setZoomLevel(z)}
+                    className={`px-1.5 py-0.5 rounded transition-colors ${
+                      zoomLevel === z
+                        ? 'bg-cyan-500/25 text-cyan-300 font-bold'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                    title={`Set Auto-Center Zoom: ${z}x`}
+                  >
+                    {z}x
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <HardwareHealthIndicator
             activeDevice={activeDevice}
             onChangeDevice={onChangeDevice}
@@ -382,9 +490,15 @@ function drawSyntheticBackground(
   const isIronbow = isThermal && deg.flirPalette === 'ironbow';
   const isNight = deg.spectrum === 'nvg_night';
 
+  const minX = -w;
+  const maxX = 2 * w;
+  const minY = -h;
+  const maxY = 2 * h;
+  const horizonY = 280;
+
   if (isThermal) {
     // Thermal background: dark cool gradient for ocean, slightly warmer horizon
-    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    const grad = ctx.createLinearGradient(0, minY, 0, maxY);
     if (isIronbow) {
       grad.addColorStop(0, '#06021a');
       grad.addColorStop(0.5, '#13042e');
@@ -395,44 +509,43 @@ function drawSyntheticBackground(
       grad.addColorStop(1, '#0e141f');
     }
     ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
   } else if (isNight) {
     // Night vision background: dark charcoal before phosphor shader
     ctx.fillStyle = '#050a08';
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
   } else {
     // Daylight EO sky and sea
-    const skyGrad = ctx.createLinearGradient(0, 0, 0, 280);
+    const skyGrad = ctx.createLinearGradient(0, minY, 0, horizonY);
     skyGrad.addColorStop(0, '#2d4b73');
     skyGrad.addColorStop(1, '#6889b0');
     ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, w, 280);
+    ctx.fillRect(minX, minY, maxX - minX, horizonY - minY);
 
-    const seaGrad = ctx.createLinearGradient(0, 280, 0, h);
+    const seaGrad = ctx.createLinearGradient(0, horizonY, 0, maxY);
     seaGrad.addColorStop(0, '#1a334d');
     seaGrad.addColorStop(1, '#0f2033');
     ctx.fillStyle = seaGrad;
-    ctx.fillRect(0, 280, w, h - 280);
+    ctx.fillRect(minX, horizonY, maxX - minX, maxY - horizonY);
   }
 
   // Draw horizon line
-  const horizonY = 280;
   ctx.strokeStyle = isThermal ? 'rgba(70, 95, 130, 0.4)' : isNight ? 'rgba(30, 80, 50, 0.4)' : 'rgba(180, 210, 240, 0.3)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(0, horizonY);
-  ctx.lineTo(w, horizonY);
+  ctx.moveTo(minX, horizonY);
+  ctx.lineTo(maxX, horizonY);
   ctx.stroke();
 
   // Distant terrain / islands / coastline
   ctx.fillStyle = isThermal ? '#161e2e' : isNight ? '#0b1610' : '#23384d';
   ctx.beginPath();
-  ctx.moveTo(0, horizonY);
-  for (let x = 0; x <= w; x += 30) {
+  ctx.moveTo(minX, horizonY);
+  for (let x = minX; x <= maxX; x += 30) {
     const hillHeight = Math.sin(x * 0.008 + 1.2) * 22 + Math.cos(x * 0.015) * 12;
     ctx.lineTo(x, horizonY - Math.max(2, hillHeight));
   }
-  ctx.lineTo(w, horizonY);
+  ctx.lineTo(maxX, horizonY);
   ctx.closePath();
   ctx.fill();
 
@@ -440,12 +553,12 @@ function drawSyntheticBackground(
   if (domain !== 'aerial') {
     ctx.strokeStyle = isThermal ? 'rgba(45, 65, 90, 0.35)' : isNight ? 'rgba(20, 60, 35, 0.35)' : 'rgba(120, 160, 200, 0.2)';
     ctx.lineWidth = 1.2;
-    for (let y = horizonY + 12; y < h; y += 18) {
+    for (let y = horizonY + 12; y < maxY; y += 18) {
       const waveSpeed = t * 18 * (y / 300);
       ctx.beginPath();
-      for (let x = 0; x < w; x += 40) {
+      for (let x = minX; x < maxX; x += 40) {
         const waveOffset = Math.sin((x + waveSpeed) * 0.04) * 3;
-        if (x === 0) ctx.moveTo(x, y + waveOffset);
+        if (x === minX) ctx.moveTo(x, y + waveOffset);
         else ctx.lineTo(x, y + waveOffset);
       }
       ctx.stroke();
@@ -607,17 +720,22 @@ function applySensorDegradationShaders(
   deg: DegradationSettings,
   t: number
 ) {
+  const minX = -w;
+  const maxX = 2 * w;
+  const minY = -h;
+  const maxY = 2 * h;
+
   // 1. NIGHT VISION PHOSPHOR GREEN SHADER
   if (deg.spectrum === 'nvg_night') {
     ctx.fillStyle = 'rgba(10, 48, 20, 0.45)';
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
 
     // Starlight photon noise grain
     const noiseCount = 350;
     ctx.fillStyle = 'rgba(167, 243, 208, 0.25)';
     for (let i = 0; i < noiseCount; i++) {
-      const nx = Math.random() * w;
-      const ny = Math.random() * h;
+      const nx = minX + Math.random() * (maxX - minX);
+      const ny = minY + Math.random() * (maxY - minY);
       ctx.fillRect(nx, ny, 1.5, 1.5);
     }
   }
@@ -625,18 +743,18 @@ function applySensorDegradationShaders(
   // 2. FOG & ADVECTION HAZE LAYER
   if (deg.fogDensity > 0.05) {
     const fogAlpha = deg.fogDensity * 0.75;
-    const fogGrad = ctx.createLinearGradient(0, 180, 0, h);
+    const fogGrad = ctx.createLinearGradient(0, minY + 180, 0, maxY);
     fogGrad.addColorStop(0, `rgba(200, 215, 230, ${fogAlpha * 0.4})`);
     fogGrad.addColorStop(0.4, `rgba(215, 225, 240, ${fogAlpha * 0.85})`);
     fogGrad.addColorStop(1, `rgba(190, 205, 220, ${fogAlpha * 0.95})`);
 
     ctx.fillStyle = fogGrad;
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
 
     // Dynamic swirling fog puffs
     ctx.fillStyle = `rgba(255, 255, 255, ${deg.fogDensity * 0.18})`;
-    for (let i = 0; i < 4; i++) {
-      const px = ((t * 22 * (i + 1) + i * 260) % (w + 200)) - 100;
+    for (let i = 0; i < 6; i++) {
+      const px = minX + ((t * 22 * (i + 1) + i * 260) % (maxX - minX + 200)) - 100;
       const py = 240 + Math.sin(t + i) * 40;
       ctx.beginPath();
       ctx.arc(px, py, 110 + i * 20, 0, Math.PI * 2);
@@ -647,14 +765,14 @@ function applySensorDegradationShaders(
   // 3. SEA SPRAY & MARINE HAZE
   if (deg.marineHaze > 0.05) {
     ctx.fillStyle = `rgba(180, 200, 220, ${deg.marineHaze * 0.25})`;
-    ctx.fillRect(0, 260, w, h - 260);
+    ctx.fillRect(minX, 260, maxX - minX, maxY - 260);
   }
 
   // 4. LOW-LIGHT / STARLIGHT ILLUMINATION
   if (deg.luxLevel < 20 && deg.spectrum === 'eo_day') {
     const darkness = (1 - deg.luxLevel / 20) * 0.88;
     ctx.fillStyle = `rgba(5, 10, 20, ${darkness})`;
-    ctx.fillRect(0, 0, w, h);
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
   }
 }
 
@@ -753,25 +871,95 @@ function drawTrackletsOverlay(
       ctx.stroke();
     }
 
-    // Kalman Filter Velocity Prediction Vector (3-second forward extrapolate)
+    // Kalman Filter 2-Second Predicted Path Vector for Active Tracklets
     if (showKalmanVector && !isLost) {
       const cx = x + w / 2;
       const cy = y + h / 2;
-      const forecastX = cx + trk.velocity[0] * 3;
-      const forecastY = cy + trk.velocity[1] * 3;
 
-      ctx.strokeStyle = isSelected ? 'rgba(239, 68, 68, 0.8)' : 'rgba(52, 211, 153, 0.8)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(forecastX, forecastY);
-      ctx.stroke();
+      // Kalman filter velocity estimation: trk.velocity is [vx, vy] in pixels/frame (~30 fps).
+      // For a 2.0-second predicted path: 2.0s * 30 frames/s = 60 frames forward projection.
+      const fps = 30;
+      const horizonSec = 2.0;
+      const vxSec = trk.velocity[0] * fps;
+      const vySec = trk.velocity[1] * fps;
 
-      // Velocity endpoint pip
-      ctx.fillStyle = isSelected ? '#ef4444' : '#34d399';
+      const predX2 = cx + vxSec * horizonSec;
+      const predY2 = cy + vySec * horizonSec;
+      const predX1 = cx + vxSec * 1.0;
+      const predY1 = cy + vySec * 1.0;
+
+      const pathDist = Math.hypot(predX2 - cx, predY2 - cy);
+
+      ctx.save();
+      const strokeColor = isSelected ? 'rgba(244, 63, 94, 0.95)' : 'rgba(52, 211, 153, 0.9)';
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = isSelected ? 2.0 : 1.5;
+
+      if (pathDist >= 2.0) {
+        const angle = Math.atan2(predY2 - cy, predX2 - cx);
+
+        // 1. Draw 2-second trajectory line
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(predX2, predY2);
+        ctx.stroke();
+
+        // 2. Draw +1.0s intermediate waypoint tick mark
+        const tickLen = isSelected ? 4 : 3;
+        const perpX = -Math.sin(angle) * tickLen;
+        const perpY = Math.cos(angle) * tickLen;
+        ctx.beginPath();
+        ctx.moveTo(predX1 - perpX, predY1 - perpY);
+        ctx.lineTo(predX1 + perpX, predY1 + perpY);
+        ctx.stroke();
+
+        // 3. Directional tactical arrowhead at +2.0s
+        const headLen = isSelected ? 7 : 5.5;
+        ctx.beginPath();
+        ctx.moveTo(predX2, predY2);
+        ctx.lineTo(
+          predX2 - headLen * Math.cos(angle - Math.PI / 6),
+          predY2 - headLen * Math.sin(angle - Math.PI / 6)
+        );
+        ctx.moveTo(predX2, predY2);
+        ctx.lineTo(
+          predX2 - headLen * Math.cos(angle + Math.PI / 6),
+          predY2 - headLen * Math.sin(angle + Math.PI / 6)
+        );
+        ctx.stroke();
+
+        // 4. Projected ghost bounding box at +2.0s to anticipate target envelope
+        ctx.save();
+        ctx.strokeStyle = isSelected ? 'rgba(244, 63, 94, 0.4)' : 'rgba(52, 211, 153, 0.28)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 3]);
+        ctx.strokeRect(predX2 - w / 2, predY2 - h / 2, w, h);
+        ctx.restore();
+
+        // 5. Operator anticipation badge (+2.0s)
+        const badgeText = isSelected ? `+2.0s [${trk.speedKnots}kt]` : '+2.0s';
+        ctx.font = '600 8.5px "JetBrains Mono", monospace';
+        const textMetrics = ctx.measureText(badgeText);
+        const textW = textMetrics.width;
+        const badgeX = predX2 + 5;
+        const badgeY = predY2 - 3;
+
+        ctx.fillStyle = 'rgba(9, 14, 27, 0.85)';
+        ctx.fillRect(badgeX - 2, badgeY - 8, textW + 4, 11);
+        ctx.strokeStyle = isSelected ? 'rgba(244, 63, 94, 0.6)' : 'rgba(52, 211, 153, 0.5)';
+        ctx.lineWidth = 0.75;
+        ctx.strokeRect(badgeX - 2, badgeY - 8, textW + 4, 11);
+        ctx.fillStyle = isSelected ? '#fca5a5' : '#a7f3d0';
+        ctx.fillText(badgeText, badgeX, badgeY);
+      }
+
+      // Endpoint pip
+      ctx.fillStyle = isSelected ? '#f43f5e' : '#34d399';
       ctx.beginPath();
-      ctx.arc(forecastX, forecastY, 2.5, 0, Math.PI * 2);
+      ctx.arc(predX2, predY2, isSelected ? 3 : 2.5, 0, Math.PI * 2);
       ctx.fill();
+
+      ctx.restore();
     }
 
     // Track ID and Class Tag
@@ -796,15 +984,20 @@ function drawTacticalHud(
   h: number,
   t: number,
   fps: number,
-  deg: DegradationSettings
+  deg: DegradationSettings,
+  autoCenter?: boolean,
+  selectedTracklet?: Tracklet | null,
+  currentZoom: number = 1.0
 ) {
   ctx.save();
   const cx = w / 2;
   const cy = h / 2;
 
-  // Center Crosshair Reticle
-  ctx.strokeStyle = 'rgba(14, 165, 233, 0.45)';
-  ctx.lineWidth = 1;
+  const isLocked = Boolean(autoCenter && selectedTracklet);
+
+  // Center Crosshair Reticle - illuminates rose/red when auto-centered on locked target
+  ctx.strokeStyle = isLocked ? 'rgba(244, 63, 94, 0.85)' : 'rgba(14, 165, 233, 0.45)';
+  ctx.lineWidth = isLocked ? 1.5 : 1;
 
   ctx.beginPath();
   // Horizontal ticks
@@ -821,10 +1014,53 @@ function drawTacticalHud(
 
   // Circle reticle
   ctx.beginPath();
-  ctx.arc(cx, cy, 50, 0, Math.PI * 2);
-  ctx.setLineDash([4, 6]);
+  ctx.arc(cx, cy, isLocked ? 46 : 50, 0, Math.PI * 2);
+  ctx.setLineDash(isLocked ? [6, 4] : [4, 6]);
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // If Target Auto-Center is active on contact, draw Tactical Gimbal Slew Box & Telemetry
+  if (isLocked && selectedTracklet) {
+    ctx.strokeStyle = 'rgba(244, 63, 94, 0.75)';
+    ctx.lineWidth = 1.5;
+    const bSize = 34;
+    const bLen = 8;
+    ctx.beginPath();
+    // Top-left
+    ctx.moveTo(cx - bSize, cy - bSize + bLen);
+    ctx.lineTo(cx - bSize, cy - bSize);
+    ctx.lineTo(cx - bSize + bLen, cy - bSize);
+    // Top-right
+    ctx.moveTo(cx + bSize - bLen, cy - bSize);
+    ctx.lineTo(cx + bSize, cy - bSize);
+    ctx.lineTo(cx + bSize, cy - bSize + bLen);
+    // Bottom-right
+    ctx.moveTo(cx + bSize, cy + bSize - bLen);
+    ctx.lineTo(cx + bSize, cy + bSize);
+    ctx.lineTo(cx + bSize - bLen, cy + bSize);
+    // Bottom-left
+    ctx.moveTo(cx - bSize + bLen, cy + bSize);
+    ctx.lineTo(cx - bSize, cy + bSize);
+    ctx.lineTo(cx - bSize, cy + bSize - bLen);
+    ctx.stroke();
+
+    // Slew Telemetry Boresight Subtitle
+    ctx.fillStyle = '#f43f5e';
+    ctx.font = '700 10px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`AUTO-CENTER [TRK-${String(selectedTracklet.id).padStart(2, '0')}]`, cx, cy + 62);
+    ctx.fillStyle = '#38bdf8';
+    ctx.font = '500 9px "JetBrains Mono", monospace';
+    const azStr = (selectedTracklet.bearingDeg >= 0 ? '+' : '') + selectedTracklet.bearingDeg.toFixed(1);
+    ctx.fillText(`GIMBAL: AZ ${azStr}° · ZOOM ${currentZoom.toFixed(1)}X`, cx, cy + 74);
+    ctx.textAlign = 'left';
+  } else if (autoCenter) {
+    ctx.fillStyle = '#0ea5e9';
+    ctx.font = '500 9px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('AUTO-CENTER: STANDBY', cx, cy + 64);
+    ctx.textAlign = 'left';
+  }
 
   // Artificial Horizon Ladder
   const rollAngle = Math.sin(t * 0.4) * 0.03; // slight platform roll

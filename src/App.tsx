@@ -71,6 +71,7 @@ export default function App() {
 
   // Interaction State
   const [selectedTrackId, setSelectedTrackId] = useState<number | null>(null);
+  const [autoCenter, setAutoCenter] = useState<boolean>(true);
   const [modalTracklet, setModalTracklet] = useState<Tracklet | null>(null);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(true);
@@ -223,6 +224,8 @@ export default function App() {
                 activeDevice={activeDevice}
                 onChangeDevice={setActiveDevice}
                 precision={activePrecision}
+                autoCenter={autoCenter}
+                onToggleAutoCenter={() => setAutoCenter(prev => !prev)}
               />
             </div>
 
@@ -233,6 +236,8 @@ export default function App() {
                 selectedTrackId={selectedTrackId}
                 onSelectTrack={setSelectedTrackId}
                 onOpenTargetDetailModal={setModalTracklet}
+                autoCenter={autoCenter}
+                onToggleAutoCenter={() => setAutoCenter(prev => !prev)}
               />
             </div>
           </div>

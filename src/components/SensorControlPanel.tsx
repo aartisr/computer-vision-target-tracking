@@ -425,8 +425,8 @@ export const SensorControlPanel: React.FC<SensorControlPanelProps> = ({
           HUD Telemetry Overlays
         </label>
         <div className="space-y-1.5">
-          <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white">
-            <span>Kalman Velocity Vectors</span>
+          <label className="flex items-center justify-between cursor-pointer text-slate-300 hover:text-white" title="Draw 2-second predicted path vectors and projected target envelope using Kalman Filter velocity estimation">
+            <span>2s Predicted Path Vectors (Kalman)</span>
             <input
               type="checkbox"
               checked={degradation.enableKalmanVectorOverlay}
